@@ -15,7 +15,7 @@
 
 ## 部署与运行
 
-1. 在 GitHub 仓库的 **Settings → Secrets and variables → Actions** 中设置 `OPENAI_API_KEY`。如使用兼容服务，在 Secrets 中设置 `OPENAI_BASE_URL`。可通过变量 `MODEL_NAME` 指定支持结构化工具调用的模型，使用 OpenAI 默认地址时，缺省模型为 `gpt-4o-mini`。使用兼容服务时，建议明确设置该供应商提供的模型名称。
+1. 在 GitHub 仓库的 **Settings → Secrets and variables → Actions** 中设置 `OPENAI_API_KEY`。如使用兼容服务，在 Secrets 中设置 `OPENAI_BASE_URL`，并在 Variables 中用 `MODEL_NAME` 填写服务商的模型 ID。模型不支持工具调用时，脚本会尝试用 JSON 输出。未指定模型时，OpenAI 地址使用 `gpt-4o-mini`，其他地址使用 `deepseek-chat`。
 2. 如需采集多个分类，设置变量 `CATEGORIES`，例如 `quant-ph, cond-mat.mes-hall`。可选变量 `NAME` 和 `EMAIL` 用于 Git 提交，可选 Secret `ACCESS_PASSWORD` 用于网页端口令验证。
 3. 在 Actions 中手动运行 **arXiv-daily-ai-enhanced** 生成首批数据。此工作流也配置了每日 17:30 UTC 的定时触发，并将日报与完整日期索引发布到 `data` 分支。同一天重跑会按 arXiv ID 合并已有论文与新抓取的论文。
 4. 在 **Settings → Pages** 中选择从 `main` 分支的根目录部署。部署后，网页从 `data` 分支读取论文数据。
@@ -36,8 +36,19 @@ ls data/*.jsonl | sed 's|data/||' > assets/file-list.txt
 
 在 **Actions → Restore or update paper archive → Run workflow** 选择任务：
 
-- `reindex` 从 `data` 分支现有文件重建日期索引，无需模型 API。
-- `backfill` 按 `from` 和 `to` 指定的日期补译、生成解析并标注应用领域。已有译文会保留，只补缺失的应用分类；重复运行会跳过已完成的论文。失败时可在 Actions 的 Annotations 查看中文处理或导出错误。
+- `reindex` 从 `data` 分支现有文件重建日期索引，无需模型 API。日历也会收录只有原始 JSONL 的日期。首页优先显示完整中文译文；没有译文时显示英文原文并标记「待翻译」。
+- `backfill` 按 `from` 和 `to` 指定的日期补译、生成解析并标注应用领域。已有译文会保留，只补缺失的应用分类；重复运行会跳过已完成的论文。建议先跑一天，确认效果后再按周或按月分批执行。失败时可在 Actions 的 Annotations 查看中文处理或导出错误。
+
+如果历史文件只在电脑上，可以先在本地预览。把已有的 `YYYY-MM-DD.jsonl` 和 `YYYY-MM-DD_AI_enhanced_Chinese.jsonl` 放在项目的 `data/` 目录；有哪种就放哪种，无需模型或 Python 依赖：
+
+```bash
+for file in data/*.jsonl; do
+  [ ! -f "$file" ] || basename "$file"
+done | LC_ALL=C sort > assets/file-list.txt
+python3 -m http.server 8000
+```
+
+在浏览器打开 `http://localhost:8000`，即可按日历查看。要恢复 GitHub Pages 上的历史，把现有 JSONL 上传到 GitHub 的 **`data` 分支**中同名的 `data/` 目录，再运行一次 `reindex`。已有完整译文和标签会直接读取。只有英文摘要的论文需要另行补译。
 
 # Plans
 See https://github.com/users/dw-dengwei/projects/3

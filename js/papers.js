@@ -95,10 +95,11 @@ const Papers = (() => {
         const files = new Map();
         for (const line of index.split(/\r?\n/)) {
           const name = line.trim();
-          const match = /^(\d{4}-\d{2}-\d{2})_AI_enhanced_(Chinese|English)\.jsonl$/.exec(name);
+          const match = /^(\d{4}-\d{2}-\d{2})(?:_AI_enhanced_(Chinese|English))?\.jsonl$/.exec(name);
           if (!match) continue;
-          const [, date, language] = match;
-          if (!files.has(date) || language === 'Chinese') files.set(date, name);
+          const [, date, language = 'original'] = match;
+          if (!files.has(date)) files.set(date, {});
+          files.get(date)[language] = name;
         }
         if (files.size || base === bases.at(-1)) {
           return { base, files, dates: [...files.keys()].sort().reverse() };
@@ -110,8 +111,7 @@ const Papers = (() => {
     throw new Error('Data index unavailable');
   }
 
-  function readDate(catalog, date) {
-    const url = `${catalog.base}/data/${catalog.files.get(date)}`;
+  function readFile(url, date) {
     if (!cache.has(url)) {
       const promise = fetchText(url).then(contents => {
         const papers = new Map();
@@ -135,6 +135,24 @@ const Papers = (() => {
       cache.set(url, promise);
     }
     return cache.get(url);
+  }
+
+  async function readDate(catalog, date) {
+    const { Chinese, English, original } = catalog.files.get(date) || {};
+    let empty = false;
+    let lastError;
+    for (const name of [Chinese, English, original]) {
+      if (!name) continue;
+      try {
+        const papers = await readFile(`${catalog.base}/data/${name}`, date);
+        if (papers.length) return papers;
+        empty = true;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (empty) return [];
+    throw lastError || new Error('Date unavailable');
   }
 
   async function readRange(catalog, start, end) {

@@ -142,8 +142,12 @@ function paperCard(paper) {
   const abstract = node('div', 'card-abstract');
   if (paper.translation) {
     abstract.append(node('h4', 'abstract-label', '中文摘要'), node('p', 'card-excerpt', paper.translation));
+  } else if (paper.abstract) {
+    const original = node('p', 'card-excerpt', paper.abstract);
+    original.lang = 'en';
+    abstract.append(node('h4', 'abstract-label', '英文原文 · 待翻译'), original);
   } else {
-    abstract.append(node('p', 'muted', '暂无中文摘要，可在详情查看原文。'));
+    abstract.append(node('p', 'muted', '暂无摘要。'));
   }
 
   const actions = node('div', 'card-actions');
