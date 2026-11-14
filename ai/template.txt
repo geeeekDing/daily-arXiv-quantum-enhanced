@@ -1,4 +1,12 @@
-Please analyze the following abstract of papers. 
+主题标签词表：{topics}
 
-Content:
-{content}
+论文标题：
+{title}
+
+原始摘要：
+{abstract}
+
+正文结论节选：
+{conclusion_excerpt}
+
+量子应用子标签词表：{applications}

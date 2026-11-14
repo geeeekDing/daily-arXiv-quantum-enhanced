@@ -7,70 +7,43 @@
 > If your jurisdiction has censorship requirements for academic data, run this code with caution; any secondary distribution version must remove the entrance accessible to China and fulfill the content review obligations, otherwise all legal consequences will be borne by the downstream.
 
 
-This innovative tool transforms how you stay updated with arXiv papers by combining automated crawling with AI-powered summarization.
+## 量子论文日报
 
+每天采集 arXiv 量子物理分类（`quant-ph`）的新论文。中文详情包含完整的摘要译文、研究结论、创新点和研究主题标签。结论和创新点优先参考 arXiv HTML 正文中的结论节选，无法提取时依据原始摘要。页面会标明资料来源。
 
-## ✨ Key Features
+首页可按日期、arXiv 分类和研究主题筛选，也可搜索标题、作者或摘要。点开论文可查看完整译文、原文摘要以及 PDF。主题统计按同一套标签计算篇数和每日趋势，同时显示打标覆盖率。历史数据可以继续浏览，未打标的论文计入覆盖率分母。
 
-🎯 **Zero Infrastructure Required**
-- Leverages GitHub Actions and Pages - no server needed
-- Completely free to deploy and use
+## 部署与运行
 
-🤖 **Smart AI Summarization**
-- Daily paper crawling with DeepSeek-powered summaries
-- Cost-effective: Only ~0.2 CNY per day
+1. 在 GitHub 仓库的 **Settings → Secrets and variables → Actions** 中设置 `OPENAI_API_KEY`。如使用兼容服务，在 Secrets 中设置 `OPENAI_BASE_URL`。可通过变量 `MODEL_NAME` 指定支持结构化工具调用的模型，使用 OpenAI 默认地址时，缺省模型为 `gpt-4o-mini`。使用兼容服务时，建议明确设置该供应商提供的模型名称。
+2. 如需采集多个分类，设置变量 `CATEGORIES`，例如 `quant-ph, cond-mat.mes-hall`。可选变量 `NAME` 和 `EMAIL` 用于 Git 提交，可选 Secret `ACCESS_PASSWORD` 用于网页端口令验证。
+3. 在 Actions 中手动运行 **arXiv-daily-ai-enhanced** 生成首批数据。此工作流也配置了每日 17:30 UTC 的定时触发，并将日报与完整日期索引发布到 `data` 分支。同一天重跑会按 arXiv ID 合并已有论文与新抓取的论文。
+4. 在 **Settings → Pages** 中选择从 `main` 分支的根目录部署。部署后，网页从 `data` 分支读取论文数据。
 
-💫 **Smart Reading Experience**
-- Personalized paper highlighting based on your interests
-- Cross-device compatibility (desktop & mobile)
-- Local preference storage for privacy
-- Flexible date range filtering
+本地需要 Python 3.12+ 和 uv。在项目根目录执行 `uv sync --locked`，激活 `.venv` 后运行 `bash run.sh`。运行成功后可在项目根目录执行 `python -m http.server 8000` 预览。
 
-🧩 **SKILL System**
-- Plug-and-play skill modules for customizing paper filtering
+若已有某日的原始 JSONL，可重新生成该日的中文数据与 Markdown 日报：
 
-⚙️ **Easy Preference Export & Integration**
-- One-click copy in Settings to export your keywords and authors configuration
-- Seamlessly combine exported preferences with SKILL for reproducible and shareable setups
+```bash
+uv run --locked python ai/enhance.py --data data/YYYY-MM-DD.jsonl
+uv run --locked python to_md/convert.py --data data/YYYY-MM-DD_AI_enhanced_Chinese.jsonl
+ls data/*.jsonl | sed 's|data/||' > assets/file-list.txt
+```
 
-👉 **[Try it now!](https://dw-dengwei.github.io/daily-arXiv-ai-enhanced/)** - No installation required
+首页和统计页共用七个大类和两级筛选。同一篇论文在同一大类只计一次，点击统计项可跳回对应的论文列表。主题词表维护在 `ai/topics.json`。研究主题和量子应用可以同时标注。「量子应用」按生物制药、化学新材料、交通物流、能源与环境、金融科技等子标签筛选与统计。
 
+### 恢复历史日期或补录旧论文
 
+在 **Actions → Restore or update paper archive → Run workflow** 选择任务：
 
-https://github.com/user-attachments/assets/b25712a4-fb8d-484f-863d-e8da6922f9d7
+- `reindex` 从 `data` 分支现有文件重建日期索引，无需模型 API。
+- `backfill` 按 `from` 和 `to` 指定的日期补译、生成解析并标注应用领域。已有译文会保留，只补缺失的应用分类；重复运行会跳过已完成的论文。失败时可在 Actions 的 Annotations 查看中文处理或导出错误。
 
-
-
-
-# How to use
-This repo will daily crawl arXiv papers about **cs.CV, cs.GR, cs.CL, cs.AI, cs.CE, cs.GT, cs.IT, cs.LG**, and use **DeepSeek** to summarize the papers in **Chinese**.
-If you wish to crawl other arXiv categories, use other LLMs, or other languages, please follow the instructions.
-Otherwise, you can watch the video above first and directly use this repo in https://dw-dengwei.github.io/daily-arXiv-ai-enhanced/. Please star it if you like :)
-
-<details>
-   <summary> If you want to customize categories, LLMs, or languages, click here.  </summary>
-
-## Instructions
-1. Fork this repo to your own account and delete my own information in [buy-me-a-coffee](./buy-me-a-coffee/README.md).
-2. Go to: your-own-repo -> Settings -> Secrets and variables -> Actions
-3. Go to Secrets. Secrets are encrypted and used for sensitive data
-4. Create two repository secrets named `OPENAI_API_KEY` and `OPENAI_BASE_URL`, and input corresponding values.
-5. [Optional] Set a password in `secrets.ACCESS_PASSWORD` if you do not wish others to access your page. (see https://github.com/dw-dengwei/daily-arXiv-ai-enhanced/pull/64)
-6. Go to Variables. Variables are shown as plain text and are used for non-sensitive data
-7. Create the following repository variables:
-   1. `CATEGORIES`: separate the categories with ",", such as "cs.CL, cs.CV"
-   2. `LANGUAGE`: such as "Chinese" or "English"
-   3. `MODEL_NAME`: such as "deepseek-chat"
-   4. `EMAIL`: your email for push to GitHub
-   5. `NAME`: your name for push to GitHub
-8. Go to your-own-repo -> Actions -> arXiv-daily-ai-enhanced
-9. You can manually click **Run workflow** to test if it works well (it may take about one hour). By default, this action will automatically run every day. You can modify it in `.github/workflows/run.yml`
-10. Set up GitHub pages: Go to your own repo -> Settings -> Pages. In `Build and deployment`, set `Source="Deploy from a branch"`, `Branch="main", "/(root)"`. Wait for a few minutes, go to https://\<username\>.github.io/daily-arXiv-ai-enhanced/. Please see this [issue](https://github.com/dw-dengwei/daily-arXiv-ai-enhanced/issues/14) for more precise instructions.
-</details>
+# Plans
+See https://github.com/users/dw-dengwei/projects/3
 
 # Contributors
 Thanks to the following special contributors for contributing code, discovering bugs, and sharing useful ideas for this project!!!
-If you find that I missed your contribution below, please feel free to contact me through email.
 <table>
   <tbody>
     <tr>

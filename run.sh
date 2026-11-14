@@ -4,14 +4,6 @@
 # 主要工作流已迁移到 GitHub Actions (.github/workflows/run.yml)
 # Main workflow has been migrated to GitHub Actions (.github/workflows/run.yml)
 
-# 环境变量检查和提示 / Environment variables check and prompt
-echo "=== 本地调试环境检查 / Local Debug Environment Check ==="
-if [ -z "$TOKEN_GITHUB" ]; then
-    echo "⚠️  提示：未设置 TOKEN_GITHUB / Warning: TOKEN_GITHUB not set"
-    echo "可能导致 GitHub 相关功能受限 / May limit GitHub related functionalities"
-fi
-    echo "✅ TOKEN_GITHUB 已设置 / TOKEN_GITHUB is set"
-
 # 检查必需的环境变量 / Check required environment variables
 if [ -z "$OPENAI_API_KEY" ]; then
     echo "⚠️  提示：未设置 OPENAI_API_KEY / Warning: OPENAI_API_KEY not set"
@@ -22,8 +14,7 @@ if [ -z "$OPENAI_API_KEY" ]; then
     echo ""
     echo "🔧 可选变量 / Optional variables:"
     echo "   export OPENAI_BASE_URL=\"https://api.openai.com/v1\"  # API基础URL / API base URL"
-    echo "   export LANGUAGE=\"Chinese\"                           # 语言设置 / Language setting"
-    echo "   export CATEGORIES=\"cs.CV, cs.CL\"                    # 关注分类 / Categories of interest"
+    echo "   export CATEGORIES=\"quant-ph\"                    # 关注分类 / Categories of interest"
     echo "   export MODEL_NAME=\"gpt-4o-mini\"                     # 模型名称 / Model name"
     echo ""
     echo "💡 设置后重新运行此脚本即可进行完整测试 / After setting, rerun this script for complete testing"
@@ -40,13 +31,11 @@ else
     PARTIAL_MODE=false
     
     # 设置默认值 / Set default values
-    export LANGUAGE="${LANGUAGE:-Chinese}"
-    export CATEGORIES="${CATEGORIES:-cs.CV, cs.CL}"
+    export CATEGORIES="${CATEGORIES:-quant-ph}"
     export MODEL_NAME="${MODEL_NAME:-gpt-4o-mini}"
     export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
     
     echo "🔧 当前配置 / Current configuration:"
-    echo "   LANGUAGE: $LANGUAGE"
     echo "   CATEGORIES: $CATEGORIES"
     echo "   MODEL_NAME: $MODEL_NAME"
     echo "   OPENAI_BASE_URL: $OPENAI_BASE_URL"
@@ -62,18 +51,10 @@ echo "本地测试：爬取 $today 的arXiv论文... / Local test: Crawling $tod
 
 # 第一步：爬取数据 / Step 1: Crawl data
 echo "步骤1：开始爬取... / Step 1: Starting crawl..."
-
-# 检查今日文件是否已存在，如存在则删除 / Check if today's file exists, delete if found
-if [ -f "data/${today}.jsonl" ]; then
-    echo "🗑️ 发现今日文件已存在，正在删除重新生成... / Found existing today's file, deleting for fresh start..."
-    rm "data/${today}.jsonl"
-    echo "✅ 已删除现有文件：data/${today}.jsonl / Deleted existing file: data/${today}.jsonl"
-else
-    echo "📝 今日文件不存在，准备新建... / Today's file doesn't exist, ready to create new one..."
-fi
+mkdir -p data
 
 cd daily_arxiv
-scrapy crawl arxiv -o ../data/${today}.jsonl
+scrapy crawl arxiv -O ../data/${today}.jsonl
 
 if [ ! -f "../data/${today}.jsonl" ]; then
     echo "爬取失败，未生成数据文件 / Crawling failed, no data file generated"
@@ -125,9 +106,9 @@ fi
 echo "步骤4：转换为Markdown... / Step 4: Converting to Markdown..."
 cd to_md
 
-if [ "$PARTIAL_MODE" = "false" ] && [ -f "../data/${today}_AI_enhanced_${LANGUAGE}.jsonl" ]; then
+if [ "$PARTIAL_MODE" = "false" ] && [ -f "../data/${today}_AI_enhanced_Chinese.jsonl" ]; then
     echo "📄 使用AI增强后的数据进行转换... / Using AI enhanced data for conversion..."
-    python convert.py --data ../data/${today}_AI_enhanced_${LANGUAGE}.jsonl
+    python convert.py --data ../data/${today}_AI_enhanced_Chinese.jsonl
     
     if [ $? -ne 0 ]; then
         echo "❌ Markdown转换失败 / Markdown conversion failed"
@@ -140,7 +121,7 @@ else
         echo "⏭️  跳过Markdown转换（部分模式，需要AI增强数据）/ Skipping Markdown conversion (partial mode, requires AI enhanced data)"
     else
         echo "❌ 错误：未找到AI增强文件 / Error: AI enhanced file not found"
-        echo "AI文件: ../data/${today}_AI_enhanced_${LANGUAGE}.jsonl"
+        echo "AI文件: ../data/${today}_AI_enhanced_Chinese.jsonl"
         exit 1
     fi
 fi

@@ -1,72 +1,59 @@
-import json
 import argparse
-import os
-from itertools import count
+import json
+from collections import defaultdict
+from pathlib import Path
+
+
+TEMPLATE = Path(__file__).with_name("paper_template.md")
+
+
+def render_paper(paper: dict, template: str) -> str:
+    ai = paper.get("AI") or {}
+    sections = []
+    translation = ai.get("abstract_zh")
+    if translation:
+        sections.append(f"**中文摘要**\n\n{translation}")
+        source = "正文结论节选与摘要" if ai.get("source") == "paper" else "摘要"
+        if ai.get("conclusion"):
+            sections.append(f"**研究结论（依据{source}）**\n\n{ai['conclusion']}")
+        if ai.get("innovations"):
+            points = "\n".join(f"- {point}" for point in ai["innovations"])
+            sections.append(f"**创新点**\n\n{points}")
+
+    sections.append(f"<details>\n<summary>原文摘要</summary>\n\n{paper.get('summary', '')}\n\n</details>")
+    tags = list(ai.get("tags", []))
+    applications = ai.get("application_tags") or []
+    if applications:
+        tags.append("量子应用 · " + "、".join(applications))
+    return template.format(
+        title=paper["title"],
+        url=paper["abs"],
+        authors="、".join(paper["authors"]),
+        tags=" · ".join(tags),
+        content="\n\n".join(sections),
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=Path, required=True)
+    args = parser.parse_args()
+
+    groups = defaultdict(list)
+    template = TEMPLATE.read_text(encoding="utf-8")
+    with args.data.open(encoding="utf-8") as stream:
+        for line in stream:
+            if line.strip():
+                paper = json.loads(line)
+                category = (paper.get("categories") or ["未分类"])[0]
+                groups[category].append(render_paper(paper, template))
+
+    markdown = ["# arXiv 论文日报\n"]
+    for category, papers in sorted(groups.items()):
+        markdown.extend([f"## {category}（{len(papers)} 篇）\n", *papers])
+    date = args.data.stem.split("_AI_enhanced_", 1)[0]
+    args.data.with_name(f"{date}.md").write_text("\n".join(markdown), encoding="utf-8")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, help="Path to the jsonline file")
-    args = parser.parse_args()
-    data = []
-    preference = os.environ.get('CATEGORIES', 'cs.CV, cs.CL').split(',')
-    preference = list(map(lambda x: x.strip(), preference))
-    def rank(cate):
-        if cate in preference:
-            return preference.index(cate)
-        else:
-            return len(preference)
-
-    with open(args.data, "r") as f:
-        for line in f:
-            data.append(json.loads(line))
-
-    categories = set([item["categories"][0] for item in data])
-    template = open("paper_template.md", "r").read()
-    categories = sorted(categories, key=rank)
-    cnt = {cate: 0 for cate in categories}
-    for item in data:
-        if item["categories"][0] not in cnt.keys():
-            continue
-        cnt[item["categories"][0]] += 1
-
-    markdown = f"<div id=toc></div>\n\n# Table of Contents\n\n"
-    for idx, cate in enumerate(categories):
-        markdown += f"- [{cate}](#{cate}) [Total: {cnt[cate]}]\n"
-
-    idx = count(1)
-    for cate in categories:
-        markdown += f"\n\n<div id='{cate}'></div>\n\n"
-        markdown += f"# {cate} [[Back]](#toc)\n\n"
-        papers = []
-        for item in data:
-            if item["categories"][0] == cate:
-                # Safely access AI fields with default values
-                ai_data = item.get('AI', {})
-                if not ai_data or not isinstance(ai_data, dict):
-                    print(f"Skipping item '{item.get('title', 'Unknown')}' due to missing or invalid AI data")
-                    continue
-                
-                # Check if all required AI fields are present
-                required_fields = ['tldr', 'motivation', 'method', 'result', 'conclusion']
-                if not all(field in ai_data for field in required_fields):
-                    print(f"Skipping item '{item.get('title', 'Unknown')}' due to incomplete AI fields")
-                    continue
-                
-                papers.append(
-                    template.format(
-                        title=item["title"],
-                        authors=",".join(item["authors"]),
-                        summary=item["summary"],
-                        url=item['abs'],
-                        tldr=ai_data.get('tldr', ''),
-                        motivation=ai_data.get('motivation', ''),
-                        method=ai_data.get('method', ''),
-                        result=ai_data.get('result', ''),
-                        conclusion=ai_data.get('conclusion', ''),
-                        cate=item['categories'][0],
-                        idx=next(idx)
-                    )
-                )
-        markdown += "\n\n".join(papers)
-    with open(args.data.split('_')[0] + '.md', "w") as f:
-        f.write(markdown)
+    main()

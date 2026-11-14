@@ -1,233 +1,166 @@
-import os
-import json
-import sys
-import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict
-from queue import Queue
-from threading import Lock
-import dotenv
 import argparse
+import json
+import os
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+from dotenv import load_dotenv
+from langchain.prompts import ChatPromptTemplate
+from langchain_core.exceptions import OutputParserException
+from langchain_openai import ChatOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError
+from pydantic import ValidationError
 from tqdm import tqdm
 
-import langchain_core.exceptions
-from langchain_openai import ChatOpenAI
-from langchain.prompts import (
-    ChatPromptTemplate,
-    SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate,
-)
-from structure import Structure
-from content_filter import is_sensitive
-from runtime import build_chat_openai_kwargs, raise_if_processing_failed
+from evidence import fetch_conclusion
+from runtime import build_chat_openai_kwargs
+from structure import ApplicationTags, Structure
 
-if os.path.exists('.env'):
-    dotenv.load_dotenv()
-template = open("template.txt", "r").read()
-system = open("system.txt", "r").read()
 
-def parse_args():
-    """解析命令行参数"""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, required=True, help="jsonline data file")
-    parser.add_argument("--max_workers", type=int, default=1, help="Maximum number of parallel workers")
-    return parser.parse_args()
+HERE = Path(__file__).resolve().parent
+TOPICS = json.loads((HERE / "topics.json").read_text(encoding="utf-8"))
+SYSTEM = (HERE / "system.txt").read_text(encoding="utf-8")
+TEMPLATE = (HERE / "template.txt").read_text(encoding="utf-8")
 
-def process_single_item(chain, item: Dict, language: str) -> Dict:
-    def check_github_code(content: str) -> Dict:
-        """提取并验证 GitHub 链接"""
-        code_info = {}
 
-        # 1. 优先匹配 github.com/owner/repo 格式
-        github_pattern = r"https?://github\.com/([a-zA-Z0-9-_]+)/([a-zA-Z0-9-_\.]+)"
-        match = re.search(github_pattern, content)
-        
-        if match:
-            owner, repo = match.groups()
-            # 清理 repo 名称，去掉可能的 .git 后缀或末尾的标点
-            repo = repo.rstrip(".git").rstrip(".,)")
-            
-            full_url = f"https://github.com/{owner}/{repo}"
-            code_info["code_url"] = full_url
-            
-            # 尝试调用 GitHub API 获取信息
-            github_token = os.environ.get("TOKEN_GITHUB")
-            headers = {"Accept": "application/vnd.github.v3+json"}
-            if github_token:
-                headers["Authorization"] = f"token {github_token}"
-            
-            try:
-                api_url = f"https://api.github.com/repos/{owner}/{repo}"
-                resp = requests.get(api_url, headers=headers, timeout=5)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    code_info["code_stars"] = data.get("stargazers_count", 0)
-                    code_info["code_last_update"] = data.get("pushed_at", "")[:10]
-            except Exception:
-                # API 调用失败不影响主流程
-                pass
-            return code_info
+def select_tags(values: list[str], choices: list[str], limit: int) -> list[str]:
+    return list(dict.fromkeys(value.strip() for value in values if value.strip() in choices))[:limit]
 
-        # 2. 如果没有 github.com，尝试匹配 github.io
-        github_io_pattern = r"https?://[a-zA-Z0-9-_]+\.github\.io(?:/[a-zA-Z0-9-_\.]+)*"
-        match_io = re.search(github_io_pattern, content)
-        
-        if match_io:
-            url = match_io.group(0)
-            # 清理末尾标点
-            url = url.rstrip(".,)")
-            code_info["code_url"] = url
-            # github.io 不进行 star 和 update 判断
-                
-        return code_info
 
-    # 检查 summary 字段
-    if is_sensitive(item.get("summary", "")):
-        return None
-
-    # 检测代码可用性
-    code_info = check_github_code(item.get("summary", ""))
-    if code_info:
-        item.update(code_info)
-
-    """处理单个数据项"""
-    # Default structure with meaningful fallback values
-    default_ai_fields = {
-        "tldr": "Summary generation failed",
-        "motivation": "Motivation analysis unavailable",
-        "method": "Method extraction failed",
-        "result": "Result analysis unavailable",
-        "conclusion": "Conclusion extraction failed"
-    }
-    
-    try:
-        response: Structure = chain.invoke({
-            "language": language,
-            "content": item['summary']
-        })
-        item['AI'] = response.model_dump()
-    except langchain_core.exceptions.OutputParserException as e:
-        # 尝试从错误信息中提取 JSON 字符串并修复
-        error_msg = str(e)
-        partial_data = {}
-        
-        if "Function Structure arguments:" in error_msg:
-            try:
-                # 提取 JSON 字符串
-                json_str = error_msg.split("Function Structure arguments:", 1)[1].strip().split('are not valid JSON')[0].strip()
-                # 预处理 LaTeX 数学符号 - 使用四个反斜杠来确保正确转义
-                json_str = json_str.replace('\\', '\\\\')
-                # 尝试解析修复后的 JSON
-                partial_data = json.loads(json_str)
-            except Exception as json_e:
-                print(f"Failed to parse JSON for {item.get('id', 'unknown')}: {json_e}", file=sys.stderr)
-        
-        # Merge partial data with defaults to ensure all fields exist
-        item['AI'] = {**default_ai_fields, **partial_data}
-        print(f"Using partial AI data for {item.get('id', 'unknown')}: {list(partial_data.keys())}", file=sys.stderr)
-    except Exception as e:
-        print(f"Unexpected error for {item.get('id', 'unknown')}: {e}", file=sys.stderr)
-        raise RuntimeError(f"AI request failed for {item.get('id', 'unknown')}") from e
-    
-    # Final validation to ensure all required fields exist
-    for field in default_ai_fields.keys():
-        if field not in item['AI']:
-            item['AI'][field] = default_ai_fields[field]
-
-    # 检查 AI 生成的所有字段
-    for v in item.get("AI", {}).values():
-        if is_sensitive(str(v)):
-            return None
-    return item
-
-def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int) -> List[Dict]:
-    """并行处理所有数据项"""
-    llm = ChatOpenAI(
-        **build_chat_openai_kwargs(
-            model_name=model_name,
-            base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            api_key=os.environ.get("OPENAI_API_KEY", ""),
-        )
-    ).with_structured_output(Structure, method="function_calling")
-
-    print('Connect to:', model_name, file=sys.stderr)
-    
-    prompt_template = ChatPromptTemplate.from_messages([
-        SystemMessagePromptTemplate.from_template(system),
-        HumanMessagePromptTemplate.from_template(template=template)
-    ])
-
-    chain = prompt_template | llm
-    
-    # 使用线程池并行处理
-    processed_data = [None] * len(data)  # 预分配结果列表
-    processing_errors = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 提交所有任务
-        future_to_idx = {
-            executor.submit(process_single_item, chain, item, language): idx
-            for idx, item in enumerate(data)
+def model_error(error: Exception) -> str:
+    if isinstance(error, APIStatusError):
+        checks = {
+            400: "检查模型是否支持结构化工具调用，以及 API 请求格式",
+            401: "检查 OPENAI_API_KEY 是否有效，且对应当前服务地址",
+            403: "检查密钥是否有权限调用当前模型",
+            404: "检查 OPENAI_BASE_URL 和 MODEL_NAME 是否与供应商配置一致",
+            429: "检查模型账户余额、配额和速率限制",
         }
-        
-        # 使用tqdm显示进度
-        for future in tqdm(
-            as_completed(future_to_idx),
-            total=len(data),
-            desc="Processing items"
-        ):
-            idx = future_to_idx[future]
-            try:
-                result = future.result()
-                processed_data[idx] = result
-            except Exception as e:
-                print(f"Item at index {idx} generated an exception: {e}", file=sys.stderr)
-                processing_errors.append(str(e))
+        hint = checks.get(error.status_code, "请查看模型服务状态")
+        return f"模型 API HTTP {error.status_code}，{hint}"
+    if isinstance(error, APITimeoutError):
+        return "模型请求超时，请检查服务状态"
+    if isinstance(error, APIConnectionError):
+        return "无法连接模型服务，请检查 OPENAI_BASE_URL 和网络"
+    if isinstance(error, (OutputParserException, ValidationError)):
+        return "模型返回未通过结构校验，请检查模型的工具调用支持"
+    return f"AI 数据处理异常（{type(error).__name__}）"
 
-    raise_if_processing_failed(processing_errors)
-    
-    return processed_data
 
-def main():
-    args = parse_args()
-    model_name = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-    language = os.environ.get("LANGUAGE", 'Chinese')
+def process_paper(chain, application_chain, paper: dict) -> tuple[dict, str | None]:
+    existing = paper.get("AI") or {}
+    has_translation = bool((existing.get("abstract_zh") or "").strip())
+    if has_translation and "application_tags" in existing:
+        return paper, None
 
-    # 检查并删除目标文件
-    target_file = args.data.replace('.jsonl', f'_AI_enhanced_{language}.jsonl')
-    if os.path.exists(target_file):
-        os.remove(target_file)
-        print(f'Removed existing file: {target_file}', file=sys.stderr)
+    abstract = paper.get("summary") or ""
+    if not abstract.strip():
+        return {**paper, "AI": existing}, "原始摘要为空"
 
-    # 读取数据
-    data = []
-    with open(args.data, "r") as f:
-        for line in f:
-            data.append(json.loads(line))
+    excerpt = existing.get("conclusion") if has_translation else fetch_conclusion(paper["id"])
+    try:
+        response = (application_chain if has_translation else chain).invoke({
+            "topics": "、".join(TOPICS["research"]),
+            "applications": "、".join(TOPICS["applications"]),
+            "title": paper.get("title", ""),
+            "abstract": abstract,
+            "conclusion_excerpt": excerpt or "未取得正文结论章节，请仅依据原始摘要。",
+        })
+        if response is None:
+            return {**paper, "AI": existing}, "模型未返回结构化内容，请检查模型的工具调用支持"
+        analysis = response.model_dump()
+        analysis["application_tags"] = select_tags(
+            analysis["application_tags"], TOPICS["applications"], 2
+        )
+        if has_translation:
+            return {**paper, "AI": {**existing, **analysis}}, None
+        if not analysis["abstract_zh"].strip():
+            return {**paper, "AI": existing}, "模型返回的中文摘要为空"
+    except Exception as error:
+        return {**paper, "AI": existing}, model_error(error)
 
-    # 去重
-    seen_ids = set()
-    unique_data = []
-    for item in data:
-        if item['id'] not in seen_ids:
-            seen_ids.add(item['id'])
-            unique_data.append(item)
+    choices = [tag for tag in TOPICS["research"] if tag != "其他"]
+    analysis["tags"] = select_tags(analysis["tags"], choices, 3) or ["其他"]
+    analysis["conclusion"] = analysis["conclusion"].strip() or "现有材料未明确给出结论。"
+    analysis["innovations"] = [point.strip() for point in analysis["innovations"] if point.strip()][:3]
+    analysis["source"] = "paper" if excerpt else "abstract"
+    return {**paper, "AI": analysis}, None
 
-    data = unique_data
-    print('Open:', args.data, file=sys.stderr)
-    
-    # 并行处理所有数据
-    processed_data = process_all_items(
-        data,
-        model_name,
-        language,
-        args.max_workers
+
+def read_papers(path: Path) -> dict:
+    papers = {}
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if line.strip():
+                paper = json.loads(line)
+                papers.setdefault(paper["id"], paper)
+    return papers
+
+
+def main() -> None:
+    load_dotenv(HERE / ".env", override=False)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=Path, required=True, help="Original arXiv JSONL file")
+    parser.add_argument("--max_workers", type=int, default=1, help="Maximum number of parallel workers")
+    parser.add_argument("--resume", action="store_true", help="Keep existing translations and fill missing fields")
+    args = parser.parse_args()
+    if args.max_workers < 1:
+        parser.error("--max_workers must be positive")
+
+    target = args.data.with_name(f"{args.data.stem}_AI_enhanced_Chinese.jsonl")
+    papers = read_papers(args.data)
+    if args.resume and target.is_file():
+        existing = read_papers(target)
+        for paper_id, paper in existing.items():
+            papers[paper_id] = {**paper, **papers.get(paper_id, {}), "AI": paper.get("AI") or {}}
+    if not papers:
+        raise SystemExit("输入文件没有论文。")
+
+    custom_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
+    base_url = custom_url or "https://api.openai.com/v1"
+    default_model = "gpt-4o-mini" if base_url.rstrip("/") == "https://api.openai.com/v1" else "deepseek-chat"
+    model_name = (os.environ.get("MODEL_NAME") or "").strip() or default_model
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise SystemExit("缺少 OPENAI_API_KEY。")
+    model = ChatOpenAI(
+        **build_chat_openai_kwargs(model_name=model_name, base_url=base_url, api_key=api_key),
+        timeout=90,
+        max_retries=2,
     )
-    
-    # 保存结果
-    with open(target_file, "w") as f:
-        for item in processed_data:
-            if item is not None:
-                f.write(json.dumps(item) + "\n")
+    prompt = ChatPromptTemplate.from_messages([("system", SYSTEM), ("human", TEMPLATE)])
+    chain = prompt | model.with_structured_output(Structure, method="function_calling")
+    application_prompt = ChatPromptTemplate.from_messages([
+        ("system", SYSTEM + "\n这次只判断量子应用子标签，摘要与结论为参考资料。"),
+        ("human", TEMPLATE),
+    ])
+    application_chain = application_prompt | model.with_structured_output(
+        ApplicationTags, method="function_calling"
+    )
+    with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+        outcomes = executor.map(lambda paper: process_paper(chain, application_chain, paper), papers.values())
+        outcomes = list(tqdm(outcomes, total=len(papers), desc="生成中文论文资料"))
+
+    results = [paper for paper, _ in outcomes]
+    failures = Counter(reason for _, reason in outcomes if reason)
+    translated = sum(bool(paper["AI"].get("abstract_zh")) for paper in results)
+    classified = sum("application_tags" in paper["AI"] for paper in results)
+    all_failed = bool(failures) and failures.total() == len(results)
+    for reason, count in failures.most_common():
+        message = f"{args.data.stem}：{count} 篇处理失败。{reason}。"
+        level = "error" if all_failed else "warning"
+        print(f"::{level}::{message}" if os.getenv("GITHUB_ACTIONS") == "true" else message)
+    if all_failed or not translated:
+        raise SystemExit("未生成新版文件，请查看上述失败原因。")
+    print(f"中文译文 {translated}/{len(papers)}，应用标签已检查 {classified}/{len(papers)}。")
+
+    temporary = target.with_suffix(".jsonl.tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        for paper in results:
+            stream.write(json.dumps(paper, ensure_ascii=False) + "\n")
+    temporary.replace(target)
+
 
 if __name__ == "__main__":
     main()
