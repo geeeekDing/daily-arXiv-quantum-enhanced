@@ -1,0 +1,124 @@
+name: Restore or update paper archive
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "任务类型：只修复日期索引，或补译和标注历史论文"
+        type: choice
+        options:
+          - reindex
+          - backfill
+        default: reindex
+      from:
+        description: "补录开始日期 YYYY-MM-DD"
+        type: string
+      to:
+        description: "补录结束日期 YYYY-MM-DD"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: arxiv-daily
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Check out existing data branch
+        id: checkout_data
+        run: |
+          archive="$RUNNER_TEMP/paper-archive"
+          git fetch --depth=1 origin data
+          git worktree add --detach "$archive" FETCH_HEAD
+          printf 'ARCHIVE=%s\n' "$archive" >> "$GITHUB_ENV"
+
+      - name: Install uv
+        if: inputs.mode == 'backfill'
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Backfill Chinese abstracts and application tags
+        if: inputs.mode == 'backfill'
+        env:
+          FROM_DATE: ${{ inputs.from }}
+          TO_DATE: ${{ inputs.to }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          MODEL_NAME: ${{ vars.MODEL_NAME }}
+        run: |
+          for value in "$FROM_DATE" "$TO_DATE"; do
+            if [[ ! "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || ! date -d "$value" +%F >/dev/null; then
+              echo "::error::请填写有效的开始和结束日期（YYYY-MM-DD）。"
+              exit 1
+            fi
+          done
+          if [[ "$FROM_DATE" > "$TO_DATE" ]]; then
+            echo "::error::开始日期必须早于或等于结束日期。"
+            exit 1
+          fi
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::缺少 OPENAI_API_KEY。"
+            exit 1
+          fi
+          if [ -z "$OPENAI_BASE_URL" ]; then unset OPENAI_BASE_URL; fi
+
+          uv sync --locked
+          staging=$(mktemp -d "$RUNNER_TEMP/backfill.XXXXXX")
+          trap 'rm -rf "$staging"' EXIT
+          shopt -s nullglob
+          matched=0
+          failed=0
+          for file in "$ARCHIVE"/data/????-??-??.jsonl; do
+            day=${file##*/}
+            day=${day%.jsonl}
+            if [[ "$day" < "$FROM_DATE" || "$day" > "$TO_DATE" ]]; then continue; fi
+            matched=$((matched + 1))
+            enhanced="${day}_AI_enhanced_Chinese.jsonl"
+            cp "$file" "$staging/$day.jsonl"
+            if [ -f "$ARCHIVE/data/$enhanced" ]; then
+              cp "$ARCHIVE/data/$enhanced" "$staging/$enhanced"
+            fi
+            if ! uv run --locked python ai/enhance.py --resume --max_workers 3 --data "$staging/$day.jsonl"; then
+              echo "::warning::$day 的中文处理脚本失败，请查看本步骤上方的错误。"
+              failed=$((failed + 1))
+              continue
+            fi
+            if ! uv run --locked python to_md/convert.py --data "$staging/$enhanced"; then
+              echo "::error::$day 的 Markdown 生成失败，请查看本步骤上方的错误。"
+              failed=$((failed + 1))
+              continue
+            fi
+            mv "$staging/$enhanced" "$staging/$day.md" "$ARCHIVE/data/"
+          done
+          if [ "$matched" -eq 0 ]; then
+            echo "::error::所选日期内没有找到原始日报。"
+            exit 1
+          fi
+          if [ "$failed" -eq "$matched" ]; then
+            echo "::error::所选日期均未能补录，请查看本步骤中各日期的错误。"
+            exit 1
+          fi
+
+      - name: Publish complete date index and updated papers
+        if: ${{ !cancelled() && steps.checkout_data.outcome == 'success' }}
+        run: |
+          cd "$ARCHIVE"
+          mkdir -p assets
+          for file in data/*.jsonl; do
+            if [ -f "$file" ]; then printf '%s\n' "${file##*/}"; fi
+          done | LC_ALL=C sort > assets/file-list.txt
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config user.name 'github-actions[bot]'
+          git add assets/file-list.txt data/
+          if ! git diff --staged --quiet; then
+            git commit -m "Update paper archive"
+            git push origin HEAD:data
+          fi
