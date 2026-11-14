@@ -183,47 +183,152 @@ const Papers = (() => {
   }
 
   function dateControls(container, dates, onChange) {
-    const from = node('select');
-    const to = node('select');
-    const toggle = node('input');
-    const fromLabel = node('label', 'form-field');
-    const toLabel = node('label', 'form-field');
-    const fromText = node('span', '', '日期');
-    const toggleLabel = node('label', 'range-toggle');
-    const datesSet = new Set(dates);
-    toggle.type = 'checkbox';
+    const availableDates = new Set(dates);
+    const latest = dates[0];
+    const months = [...new Set(dates.map(date => date.slice(0, 7)))].sort();
+    let startDate = latest;
+    let endDate = latest;
+    let month = latest.slice(0, 7);
+    let selectingEnd = false;
 
-    for (const select of [from, to]) {
-      for (const date of dates) select.add(new Option(shortDate(date), date));
+    function button(className, label) {
+      const control = node('button', className, label);
+      control.type = 'button';
+      return control;
     }
 
-    fromLabel.append(fromText, from);
-    toLabel.append(node('span', '', '结束日期'), to);
-    toggleLabel.append(toggle, '按日期范围');
-    container.replaceChildren(fromLabel, toggleLabel, toLabel);
+    const selection = node('div', 'calendar-selection');
+    const start = button('calendar-endpoint');
+    const end = button('calendar-endpoint');
+    const range = node('input');
+    range.type = 'checkbox';
+    const rangeLabel = node('label', 'range-toggle');
+    rangeLabel.append(range, '按日期范围');
+    const toolbar = node('div', 'calendar-toolbar');
+    const previous = button('calendar-arrow', '‹');
+    const next = button('calendar-arrow', '›');
+    previous.setAttribute('aria-label', '上个月');
+    next.setAttribute('aria-label', '下个月');
+    const monthPicker = node('select', 'calendar-month');
+    monthPicker.setAttribute('aria-label', '跳转到月份');
+    for (const value of months) {
+      const [year, number] = value.split('-');
+      monthPicker.add(new Option(`${year}年${Number(number)}月`, value));
+    }
+    toolbar.append(previous, monthPicker, next);
 
-    function sync() {
-      const range = toggle.checked;
-      fromText.textContent = range ? '开始日期' : '日期';
-      toLabel.hidden = !range;
-      if (range && to.value < from.value) to.value = from.value;
-      for (const option of to.options) option.disabled = option.value < from.value;
-      onChange(from.value, range ? to.value : from.value);
+    const weekdays = node('div', 'calendar-grid calendar-weekdays');
+    weekdays.setAttribute('aria-hidden', 'true');
+    for (const label of ['一', '二', '三', '四', '五', '六', '日']) {
+      weekdays.append(node('span', '', label));
+    }
+    const days = node('div', 'calendar-grid calendar-days');
+    days.setAttribute('role', 'group');
+    const footer = node('div', 'calendar-footer');
+    const latestButton = button('text-button', '回到最新');
+    const legend = node('span', 'calendar-legend', '有论文');
+    footer.append(legend, latestButton);
+
+    selection.append(start, end);
+    container.replaceChildren(selection, rangeLabel, toolbar, weekdays, days, footer);
+
+    function render(focusDate) {
+      const rangeMode = range.checked;
+      start.textContent = `${rangeMode ? '开始' : '日期'} ${shortDate(startDate)}`;
+      start.setAttribute('aria-pressed', String(!selectingEnd));
+      end.textContent = `结束 ${shortDate(endDate)}`;
+      end.setAttribute('aria-pressed', String(selectingEnd));
+      end.hidden = !rangeMode;
+      monthPicker.value = month;
+      const monthIndex = months.indexOf(month);
+      previous.disabled = monthIndex === 0;
+      next.disabled = monthIndex === months.length - 1;
+      days.setAttribute('aria-label', `${monthPicker.selectedOptions[0].textContent}可选日期`);
+
+      const [year, number] = month.split('-').map(Number);
+      const firstWeekday = new Date(Date.UTC(year, number - 1, 1)).getUTCDay();
+      const blanks = (firstWeekday + 6) % 7;
+      const totalDays = new Date(Date.UTC(year, number, 0)).getUTCDate();
+      const cells = [];
+      let focusButton;
+      for (let index = 0; index < blanks; index += 1) {
+        const blank = node('span');
+        blank.setAttribute('aria-hidden', 'true');
+        cells.push(blank);
+      }
+      for (let day = 1; day <= totalDays; day += 1) {
+        const date = `${month}-${String(day).padStart(2, '0')}`;
+        const control = button('calendar-day', day);
+        const hasPapers = availableDates.has(date);
+        const selected = date === startDate || (rangeMode && date === endDate);
+        control.disabled = !hasPapers || (selectingEnd && date < startDate);
+        control.classList.toggle('has-papers', hasPapers);
+        control.classList.toggle('in-range', rangeMode && date > startDate && date < endDate);
+        control.setAttribute('aria-pressed', String(selected));
+        control.setAttribute('aria-label', hasPapers ? date : `${date}，无论文`);
+        control.addEventListener('click', () => choose(date));
+        if (date === focusDate) focusButton = control;
+        cells.push(control);
+      }
+      days.replaceChildren(...cells);
+      if (focusButton && !focusButton.disabled) focusButton.focus({ preventScroll: true });
     }
 
-    function set(start, end) {
-      from.value = datesSet.has(start) ? start : dates[0];
-      to.value = datesSet.has(end) ? end : from.value;
-      toggle.checked = from.value < to.value;
-      sync();
+    function apply(focusDate) {
+      render(focusDate);
+      onChange(startDate, range.checked ? endDate : startDate);
     }
 
-    toggle.addEventListener('change', () => {
-      if (toggle.checked && to.value === from.value) to.value = dates[0];
-      sync();
+    function choose(date) {
+      if (selectingEnd) {
+        endDate = date;
+      } else {
+        startDate = date;
+        if (endDate < date || !range.checked) endDate = date;
+        selectingEnd = range.checked;
+      }
+      apply(date);
+    }
+
+    function set(startValue, endValue) {
+      startDate = availableDates.has(startValue) ? startValue : latest;
+      endDate = availableDates.has(endValue) && endValue >= startDate ? endValue : startDate;
+      range.checked = startDate < endDate;
+      selectingEnd = false;
+      month = startDate.slice(0, 7);
+      apply();
+    }
+
+    function openEndpoint(isEnd) {
+      selectingEnd = isEnd;
+      month = (isEnd ? endDate : startDate).slice(0, 7);
+      render();
+    }
+
+    function moveMonth(offset) {
+      const destination = months[months.indexOf(month) + offset];
+      if (!destination) return;
+      month = destination;
+      render();
+      if (offset < 0 && previous.disabled) next.focus();
+      if (offset > 0 && next.disabled) previous.focus();
+    }
+
+    start.addEventListener('click', () => openEndpoint(false));
+    end.addEventListener('click', () => openEndpoint(true));
+    previous.addEventListener('click', () => moveMonth(-1));
+    next.addEventListener('click', () => moveMonth(1));
+    monthPicker.addEventListener('change', () => {
+      month = monthPicker.value;
+      render();
     });
-    from.addEventListener('change', sync);
-    to.addEventListener('change', sync);
+    range.addEventListener('change', () => {
+      selectingEnd = false;
+      endDate = range.checked ? latest : startDate;
+      month = startDate.slice(0, 7);
+      apply();
+    });
+    latestButton.addEventListener('click', () => set(latest, latest));
     return set;
   }
 
