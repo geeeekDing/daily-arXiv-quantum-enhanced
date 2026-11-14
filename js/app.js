@@ -2,7 +2,7 @@
 
 const { node, externalLink, shortDate } = Papers;
 const elements = Object.fromEntries([
-  'latestDate', 'latestCount', 'dateFields', 'categoryBlock', 'category', 'topics', 'search',
+  'latestDate', 'latestCount', 'dateFields', 'topics', 'search',
   'preferenceBar', 'preferredOnly', 'resultCount', 'feedStatus', 'papers', 'showMore', 'resetFilters',
   'paperDialog', 'paperDetails', 'detailDate', 'closeDetail',
 ].map(id => [id, document.getElementById(id)]));
@@ -164,9 +164,7 @@ function paperCard(paper) {
 function showPapers() {
   if (loading || !available) return;
   const query = elements.search.value.trim().toLowerCase();
-  const category = elements.category.value;
   const results = records.filter(paper =>
-    (!category || paper.categories.includes(category)) &&
     (!selectedTag || paper.topics.has(selectedTag)) &&
     (!elements.preferredOnly.checked || paper.preferred) &&
     (!query || paper.searchable.includes(query))
@@ -260,9 +258,6 @@ async function load(start, end) {
   records = result.papers.map(paper => ({
     ...paper, topics: Papers.paperTopics(paper, topicGroups), searchable: searchable(paper), preferred: matchesPreference(paper),
   })).sort((a, b) => Number(b.preferred) - Number(a.preferred));
-  const categories = [...new Set(records.flatMap(paper => paper.categories))].sort();
-  elements.category.replaceChildren(new Option('全部分类', ''), ...categories.map(category => new Option(category)));
-  elements.categoryBlock.hidden = categories.length < 2;
   renderTopicFilters();
 }
 
@@ -278,7 +273,6 @@ elements.search.addEventListener('input', () => {
   visible = pageSize;
   showPapers();
 });
-elements.category.addEventListener('change', updateFilters);
 elements.preferredOnly.addEventListener('change', updateFilters);
 elements.showMore.addEventListener('click', () => {
   visible += pageSize;

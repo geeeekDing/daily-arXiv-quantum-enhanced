@@ -12,7 +12,7 @@
   <script>Auth.requireAuth();</script>
   <script defer src="js/data-config.js?v=20261114-quantum-data"></script>
   <script defer src="js/papers.js?v=20261114-archive"></script>
-  <script defer src="js/app.js?v=20261114-archive"></script>
+  <script defer src="js/app.js?v=20261114-no-category"></script>
 </head>
 <body>
 <header class="site-header">
@@ -42,10 +42,6 @@
       <details id="filterDisclosure" class="filter-disclosure" open>
         <summary>日期与主题筛选</summary>
         <div class="date-fields" id="dateFields"></div>
-        <div class="filter-block" id="categoryBlock" hidden>
-          <label for="category">arXiv 分类</label>
-          <select id="category"></select>
-        </div>
         <div class="filter-block">
           <h3>研究主题</h3>
           <div class="topic-list" id="topics"></div>
