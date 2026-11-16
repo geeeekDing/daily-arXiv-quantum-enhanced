@@ -2,7 +2,9 @@ name: arXiv-daily-ai-enhanced
 
 on:
   schedule:
-    - cron: "30 17 * * *"
+    # Beijing time: 12:00 to 17:30 every half hour, then a final 18:00 check.
+    - cron: "0,30 4-9 * * 1-5"
+    - cron: "0 10 * * 1-5"
   workflow_dispatch:
 
 permissions:
@@ -19,39 +21,57 @@ jobs:
       CATEGORIES: ${{ vars.CATEGORIES || 'quant-ph' }}
 
     steps:
+      - name: Check whether today's announcement is already archived
+        id: poll
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          read -r today weekday hhmm < <(TZ=Asia/Shanghai date '+%F %u %H%M')
+          if (( weekday > 5 || 10#$hhmm < 1200 || 10#$hhmm > 1800 )); then
+            echo "::notice::本次定时运行已超出北京时间工作日 12:00–18:00 的检查时段。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          code=$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+            --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/data/${today}_AI_enhanced_Chinese.jsonl?ref=data")
+          case "$code" in
+            200)
+              echo "::notice::$today 日报已归档，本次无需再次检查 arXiv。"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404) echo "expected_date=$today" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::查询日报归档失败（HTTP $code）。"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@v5
+        if: steps.poll.outputs.skip != 'true'
         with:
           ref: main
 
       - name: Install uv
+        if: steps.poll.outputs.skip != 'true'
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
 
       - name: Install dependencies
+        if: steps.poll.outputs.skip != 'true'
         run: uv sync --locked
 
       - name: Crawl and deduplicate arXiv papers
         id: crawl
+        if: steps.poll.outputs.skip != 'true'
+        env:
+          EXPECTED_DATE: ${{ steps.poll.outputs.expected_date }}
         run: |
           set -euo pipefail
-          today=$(date -u +%F)
-          echo "date=$today" >> "$GITHUB_OUTPUT"
-          mkdir -p data
-          prior="$RUNNER_TEMP/$today.jsonl"
+          staging=$(mktemp -d)
+          archive="$staging/archive"
           if git ls-remote --exit-code --heads origin refs/heads/data >/dev/null; then
             git fetch --depth=1 origin data
-            if git cat-file -e "FETCH_HEAD:data/$today.jsonl" 2>/dev/null; then
-              git show "FETCH_HEAD:data/$today.jsonl" > "$prior"
-            fi
-            existing="data/${today}_AI_enhanced_Chinese.jsonl"
-            if git cat-file -e "FETCH_HEAD:$existing" 2>/dev/null; then
-              git show "FETCH_HEAD:$existing" > "$existing"
-            fi
-            for offset in {1..7}; do
-              path="data/$(date -u -d "$offset days ago" +%F).jsonl"
-              if git cat-file -e "FETCH_HEAD:$path" 2>/dev/null; then
-                git show "FETCH_HEAD:$path" > "$path"
-              fi
-            done
+            git worktree add --detach "$archive" FETCH_HEAD
           else
             remote_status=$?
             if [ "$remote_status" -ne 2 ]; then
@@ -59,36 +79,28 @@ jobs:
             fi
           fi
 
-          source .venv/bin/activate
-          cd daily_arxiv
-          scrapy crawl arxiv -O "../data/$today.jsonl"
-          test -f "../data/$today.jsonl"
+          (
+            cd daily_arxiv
+            ../.venv/bin/scrapy crawl arxiv -a manifest="$staging/manifest.json" -O "$staging/papers.jsonl"
+          )
+          test -f "$staging/manifest.json"
+          touch "$staging/papers.jsonl"
           status=0
-          python daily_arxiv/check_stats.py || status=$?
+          day=$(.venv/bin/python daily_arxiv/daily_arxiv/check_stats.py prepare \
+            --manifest "$staging/manifest.json" --crawl "$staging/papers.jsonl" \
+            --archive "$archive" --output data --expected-date "${EXPECTED_DATE:-}") || status=$?
           case "$status" in
             0)
-              if [ -f "$prior" ]; then
-                python - "$prior" "../data/$today.jsonl" <<'PYTHON'
-          import json
-          import sys
-          from pathlib import Path
-
-          prior, current = map(Path, sys.argv[1:])
-          papers = {}
-          for source in (prior, current):
-              for line in source.read_text(encoding="utf-8").splitlines():
-                  if line.strip():
-                      paper = json.loads(line)
-                      papers[paper["id"]] = paper
-          current.write_text(
-              "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in papers.values()),
-              encoding="utf-8",
-          )
-          PYTHON
+              enhanced="${day}_AI_enhanced_Chinese.jsonl"
+              if [ -f "$archive/data/$enhanced" ]; then
+                cp "$archive/data/$enhanced" "data/$enhanced"
               fi
-              echo "has_new_content=true" >> "$GITHUB_OUTPUT"
+              printf 'date=%s\nhas_new_content=true\n' "$day" >> "$GITHUB_OUTPUT"
               ;;
-            1) echo "has_new_content=false" >> "$GITHUB_OUTPUT" ;;
+            1)
+              echo "has_new_content=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::当前 arXiv 公告没有未归档的新论文，本次跳过翻译和发布。"
+              ;;
             *) exit "$status" ;;
           esac
 
@@ -151,10 +163,10 @@ jobs:
               printf '# arXiv data archive\n' > README.md
             )
           fi
+          mkdir -p "$output/archive/data"
+          cp "$output"/*.jsonl "$output"/*.md "$output/archive/data/"
+          python3 daily_arxiv/daily_arxiv/check_stats.py reindex "$output/archive"
           cd "$output/archive"
-          mkdir -p data assets
-          cp "$output"/*.jsonl "$output"/*.md data/
-          for path in data/*.jsonl; do printf '%s\n' "${path##*/}"; done | LC_ALL=C sort > assets/file-list.txt
           git add -A
           if ! git diff --staged --quiet; then
             git commit -m "update: $DATE arXiv papers"
